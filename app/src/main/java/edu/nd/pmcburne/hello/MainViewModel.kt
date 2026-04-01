@@ -1,41 +1,108 @@
 package edu.nd.pmcburne.hello
 
-import androidx.lifecycle.ViewModel
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import retrofit2.Retrofit
+import retrofit2.converter.gson.GsonConverterFactory
 
-data class MainUIState(
-    val counterValue: Int
+data class Location(
+    val id: Int,
+    val name: String,
+    val description: String,
+    val latitude: Double,
+    val longitude: Double,
+    val tags: List<String>
 )
 
-class MainViewModel(
-    val initialCounterValue: Int = 0
-) : ViewModel() {
-    private val _uiState = MutableStateFlow(MainUIState(initialCounterValue))
+data class MainUIState(
+    val allLocations: List<Location> = emptyList(),
+    val filteredLocations: List<Location> = emptyList(),
+    val availableTags: List<String> = emptyList(),
+    val selectedTag: String = "core"
+)
+
+class MainViewModel(application: Application) : AndroidViewModel(application) {
+    private val _uiState = MutableStateFlow(MainUIState())
     val uiState: StateFlow<MainUIState> = _uiState.asStateFlow()
 
-    fun incrementCounter() {
-        _uiState.update{ currentState ->
-            currentState.copy(counterValue = _uiState.value.counterValue + 1)
+    private val database = AppDatabase.getDatabase(application)
+
+    private val api = Retrofit.Builder()
+        .baseUrl("https://www.cs.virginia.edu/")
+        .addConverterFactory(GsonConverterFactory.create())
+        .build()
+        .create(PlacemarkApi::class.java)
+
+    init {
+        refreshData()
+    }
+
+    private fun refreshData() {
+        viewModelScope.launch {
+            try {
+                val response = api.getPlacemarks()
+                val entities = response.map {
+                    LocationEntity(
+                        id = it.id,
+                        name = it.name,
+                        description = it.description,
+                        latitude = it.visual_center.latitude,
+                        longitude = it.visual_center.longitude,
+                        tags = it.tag_list.joinToString(",")
+                    )
+                }
+                database.locationDao().insertAll(entities)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            } finally {
+                loadFromDb()
+            }
         }
     }
 
-    fun decrementCounter() {
-        _uiState.update{ currentState ->
-            currentState.copy(counterValue = _uiState.value.counterValue - 1)
+    private suspend fun loadFromDb() {
+        val entities = database.locationDao().getAll()
+        val locations = entities.map {
+            Location(
+                id = it.id,
+                name = it.name,
+                description = it.description,
+                latitude = it.latitude,
+                longitude = it.longitude,
+                tags = it.tags.split(",")
+            )
         }
-    }
 
-    fun resetCounter() {
+        val tags = locations.flatMap { it.tags }.distinct().sorted()
+
         _uiState.update { currentState ->
-            currentState.copy(counterValue = 0)
+            currentState.copy(
+                allLocations = locations,
+                availableTags = tags,
+                selectedTag = if (tags.contains("core")) "core" else (tags.firstOrNull() ?: "")
+            )
         }
+        applyFilter()
     }
 
-    val isDecrementEnabled: Boolean
-        get() = _uiState.value.counterValue > 0
-    val isResetEnabled: Boolean
-        get() = _uiState.value.counterValue > 0
+    fun selectTag(tag: String) {
+        _uiState.update { it.copy(selectedTag = tag) }
+        applyFilter()
+    }
+
+    private fun applyFilter() {
+        _uiState.update { currentState ->
+            currentState.copy(
+                filteredLocations = currentState.allLocations.filter {
+                    it.tags.contains(currentState.selectedTag)
+                }
+            )
+        }
+    }
 }
